@@ -1,3 +1,4 @@
+import os
 import requests
 import time
 import asyncio
@@ -6,18 +7,24 @@ from fastapi.responses import RedirectResponse
 from supabase import create_client
 from typing import Any
 
-CLIENT_ID = 184811
-CLIENT_SECRET = "f211a3bf3d878f3e9096cb90f6d3d78c75ed2477"
-REDIRECT_URI = "http://192.168.1.15:8000/exchange_token"
+# -----------------------------------------------
+# 1) ENVIRONMENT VARIABLES (Render stores secrets)
+# -----------------------------------------------
+CLIENT_ID = os.getenv("STRAVA_CLIENT_ID")
+CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET")
+REDIRECT_URI = os.getenv("STRAVA_REDIRECT_URI")
 SCOPE = "read,activity:read_all"
 
-SUPABASE_URL = "https://hicsdiuldmcpolnvyapv.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhpY3NkaXVsZG1jcG9sbnZ5YXB2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTkyOTM3NTAsImV4cCI6MjA3NDg2OTc1MH0.UumpymuCYtykPsp0f3EWY_UduwuhNizzFupT4LeaKEs"
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
 
 
+# -----------------------------------------------
+# 2) Exchange auth code → permanent tokens
+# -----------------------------------------------
 @app.get("/exchange_token")
 def exchange_tokens(code: str, scope: str):
     response = requests.post(
@@ -47,12 +54,16 @@ def exchange_tokens(code: str, scope: str):
     return {"message": "success", "athlete_id": athlete["id"]}
 
 
+# -------------------------------------------------------
+# 3) Validate & refresh access tokens when expired
+# -------------------------------------------------------
 def ensure_accessToken_valid(user_id: str):
     response = supabase.table("USERS").select("*").eq("id", user_id).execute()
     if not response.data:
         return None
 
     user = response.data[0]
+
     if time.time() >= user["expires_at"]:
         if not regenerate_token(user_id, user["refresh_token"]):
             return None
@@ -88,6 +99,10 @@ def regenerate_token(user_id: str, refresh_token: str):
     return True
 
 
+
+# -------------------------------------------------------
+# 4) Background worker to fetch daily stats
+# -------------------------------------------------------
 @app.on_event("startup")
 async def startup():
     asyncio.create_task(periodic())
@@ -101,6 +116,10 @@ async def periodic():
         await asyncio.sleep(24 * 60 * 60)
 
 
+
+# -------------------------------------------------------
+# 5) Fetch ride/run/swim stats for each user
+# -------------------------------------------------------
 async def fetch_stats(user_id: str):
     token = ensure_accessToken_valid(user_id)
     if not token:
@@ -114,6 +133,7 @@ async def fetch_stats(user_id: str):
 
     data = response.json()
 
+    # ride data
     supabase.table("RIDES").upsert({
         "id": user_id,
         "month_dist": data["recent_ride_totals"]["distance"],
@@ -124,6 +144,7 @@ async def fetch_stats(user_id: str):
         "all_elevation": data["all_ride_totals"]["elevation_gain"],
     }, on_conflict="id").execute()
 
+    # run data
     supabase.table("RUNS").upsert({
         "id": user_id,
         "month_dist": data["recent_run_totals"]["distance"],
@@ -134,6 +155,7 @@ async def fetch_stats(user_id: str):
         "all_elevation": data["all_run_totals"]["elevation_gain"],
     }, on_conflict="id").execute()
 
+    # swim data
     supabase.table("SWIMS").upsert({
         "id": user_id,
         "month_dist": data["recent_swim_totals"]["distance"],
@@ -142,6 +164,9 @@ async def fetch_stats(user_id: str):
     }, on_conflict="id").execute()
 
 
+# -------------------------------------------------------
+# 6) OAuth login redirect
+# -------------------------------------------------------
 @app.get("/login")
 def login():
     auth = (
@@ -154,6 +179,9 @@ def login():
     return RedirectResponse(url=auth)
 
 
+# -------------------------------------------------------
+# 7) Leaderboard endpoint
+# -------------------------------------------------------
 @app.get("/leaderboard")
 async def leaderboard():
     users = supabase.table("USERS").select("id, username").execute().data
