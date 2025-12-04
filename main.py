@@ -218,3 +218,4 @@ async def ride(user_id: str):
 @app.get("/swim")
 async def swim(user_id: str):
     return supabase.table("SWIMS").select("*").eq("id", user_id).execute().data[0]
+
