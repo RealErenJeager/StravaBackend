@@ -1,208 +1,167 @@
+import os
 import requests
 import time
 import asyncio
 from fastapi import FastAPI, Response, Cookie
-from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.responses import RedirectResponse
 from supabase import create_client
-from typing import Any, Annotated
+from typing import Any, Optional
 
-
-CLIENT_ID = 184811
-REDIRECT_URI = "https://stravabackend.onrender.com/exchange_token"
+# -----------------------------
+# 1) ENVIRONMENT VARIABLES
+# -----------------------------
+CLIENT_ID = os.getenv("STRAVA_CLIENT_ID")
+CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET")
+REDIRECT_URI = os.getenv("STRAVA_REDIRECT_URI")
 SCOPE = "read,activity:read_all"
-CLIENT_SECRET= "f211a3bf3d878f3e9096cb90f6d3d78c75ed2477"
 
-SUPABASE_URL = "https://nujprkwzitxyknezdgfw.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51anBya3d6aXR4eWtuZXpkZ2Z3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1OTUxNDIxOSwiZXhwIjoyMDc1MDkwMjE5fQ.9UloBpTL51uGDLUfngsUWf2P4kE-IaS3H1PlhlhZzHg"
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
 
 
-
-# ---------------------------------------------------------
-# EXCHANGE TOKEN
-# ---------------------------------------------------------
-@app.api_route("/exchange_token", methods=["GET", "HEAD"])
+# -----------------------------
+# 2) Exchange code → tokens
+# -----------------------------
+@app.get("/exchange_token")
 def exchange_tokens(code: str, scope: str):
     if not code:
-        return JSONResponse({"error": "Missing or invalid authorization code"})
+        return {"error": "Missing authorization code"}
 
-    response = requests.post(
+    res = requests.post(
         "https://www.strava.com/oauth/token",
         data={
-            "client_id": f"{CLIENT_ID}",
-            "client_secret": f"{CLIENT_SECRET}",
-            "code": f"{code}",
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "code": code,
             "grant_type": "authorization_code"
         }
     )
+    if res.status_code != 200:
+        return {"error": res.text}
 
-    if response.status_code != 200:
-        return JSONResponse({"error": "Token exchange failed", "details": response.text})
-
-    token = response.json()
+    token = res.json()
     athlete = token["athlete"]
 
-    fastapi_response = JSONResponse({"message": "Token exchange successful"})
-
-    fastapi_response.set_cookie(
-        key="FTC_Token",
-        value=athlete["id"],
-        httponly=True,
-        samesite="lax",
-        secure=False
-    )
-
-    user_data = {
+    # store tokens in Supabase
+    supabase.table("USERS").upsert({
         "id": athlete["id"],
         "username": athlete["username"],
         "access_token": token["access_token"],
         "refresh_token": token["refresh_token"],
         "expires_at": token["expires_at"]
-    }
+    }, on_conflict="id").execute()
 
-    supabase.table("USERS").upsert(user_data, on_conflict="id").execute()
+    response = Response(content="Token exchange successful")
+    response.set_cookie(key="FTC_Token", value=str(athlete["id"]), httponly=True, samesite="lax", secure=True)
+    return response
 
-    return fastapi_response
 
-
-
-# ---------------------------------------------------------
-# TOKEN REFRESH HELPERS
-# ---------------------------------------------------------
-def ensure_accessToken_valid(user_id: str) -> str | None:
-    response: Any = supabase.table("USERS").select("*").eq("id", user_id).execute()
-    if not response.data:
+# -----------------------------
+# 3) Token management
+# -----------------------------
+def ensure_access_token(user_id: str) -> Optional[str]:
+    res = supabase.table("USERS").select("*").eq("id", user_id).execute()
+    if not res.data:
         return None
-    user_data = response.data[0]
-    expire_time = user_data["expires_at"]
+    user = res.data[0]
 
-    if (time.time() >= expire_time):
-        print(f"Access code for {user_id} is being refreshed")
-        if not regenerate_token(user_data["id"], user_data["refresh_token"]):
+    if time.time() >= user["expires_at"]:
+        if not refresh_token(user_id, user["refresh_token"]):
             return None
+        user = supabase.table("USERS").select("*").eq("id", user_id).execute().data[0]
 
-        response = supabase.table("USERS").select("access_token").eq("id", user_id).execute()
-        return response.data[0]["access_token"]
-
-    return user_data["access_token"]
+    return user["access_token"]
 
 
-def regenerate_token(user_id: str, token: str) -> bool:
-    response = requests.post(
+def refresh_token(user_id: str, refresh_token: str) -> bool:
+    res = requests.post(
         "https://www.strava.com/oauth/token",
         data={
             "client_id": CLIENT_ID,
             "client_secret": CLIENT_SECRET,
             "grant_type": "refresh_token",
-            "refresh_token": token
+            "refresh_token": refresh_token
         }
     )
-
-    if response.status_code != 200:
-        print("Failed to regenerate the token")
+    if res.status_code != 200:
         return False
-
-    new_token = response.json()
-    supabase.table("USERS").upsert(
-        {
-            "id": user_id,
-            "access_token": new_token["access_token"],
-            "refresh_token": new_token["refresh_token"],
-            "expires_at": new_token["expires_at"]
-        }, on_conflict="id"
-    ).execute()
-
+    token = res.json()
+    supabase.table("USERS").upsert({
+        "id": user_id,
+        "access_token": token["access_token"],
+        "refresh_token": token["refresh_token"],
+        "expires_at": token["expires_at"]
+    }, on_conflict="id").execute()
     return True
 
 
-
-# ---------------------------------------------------------
-# STARTUP BACKGROUND JOB
-# ---------------------------------------------------------
+# -----------------------------
+# 4) Background periodic fetch
+# -----------------------------
 @app.on_event("startup")
 async def startup():
-    asyncio.create_task(periodic_activities())
+    asyncio.create_task(periodic_fetch())
 
 
-async def periodic_activities():
+async def periodic_fetch():
     while True:
-        print("Grabbing all user data from strava")
-        Users: list[Any] = supabase.table("USERS").select("id").execute().data
-        for user in Users:
-            id = user["id"]
-            asyncio.create_task(getActivites(id))
-
-        print("All data on supabase has been updated")
+        users = supabase.table("USERS").select("id").execute().data
+        for u in users:
+            asyncio.create_task(fetch_stats(u["id"]))
         await asyncio.sleep(24 * 60 * 60)
 
 
+# -----------------------------
+# 5) Fetch ride/run/swim stats
+# -----------------------------
+async def fetch_stats(user_id: str):
+    token = ensure_access_token(user_id)
+    if not token:
+        return
 
-async def getActivites(user_id: str):
-    ID = user_id
-    if not ensure_accessToken_valid(ID):
-        return {"error": "Access Token Invalid"}
-    Strava_Token: Any = supabase.table("USERS").select("access_token").eq("id", user_id).execute()
-    Strava_Token = Strava_Token.data[0]["access_token"]
-    print("This is your token::", Strava_Token)
+    url = f"https://www.strava.com/api/v3/athletes/{user_id}/stats"
+    res = requests.get(url, headers={"Authorization": f"Bearer {token}"})
+    if res.status_code != 200:
+        return
 
-    headers = {"Authorization": f"Bearer {Strava_Token}"}
-    activityUrl = f"https://www.strava.com/api/v3/athletes/{ID}/stats"
+    data = res.json()
 
-    response = requests.get(activityUrl, headers=headers)
+    supabase.table("RIDES").upsert({
+        "id": user_id,
+        "month_dist": data["recent_ride_totals"]["distance"],
+        "month_elevation": data["recent_ride_totals"]["elevation_gain"],
+        "year_dist": data["ytd_ride_totals"]["distance"],
+        "year_elevation": data["ytd_ride_totals"]["elevation_gain"],
+        "all_dist": data["all_ride_totals"]["distance"],
+        "all_elevation": data["all_ride_totals"]["elevation_gain"]
+    }, on_conflict="id").execute()
 
-    if response.status_code != 200:
-        return {"error": "Failed to fetch data", "status": response.status_code, "details": response.text}
+    supabase.table("RUNS").upsert({
+        "id": user_id,
+        "month_dist": data["recent_run_totals"]["distance"],
+        "month_elevation": data["recent_run_totals"]["elevation_gain"],
+        "year_dist": data["ytd_run_totals"]["distance"],
+        "year_elevation": data["ytd_run_totals"]["elevation_gain"],
+        "all_dist": data["all_run_totals"]["distance"],
+        "all_elevation": data["all_run_totals"]["elevation_gain"]
+    }, on_conflict="id").execute()
 
-    data = response.json()
-
-    # Rides
-    supabase.table("RIDES").upsert(
-        {
-            "id": ID,
-            "month_dist": data["recent_ride_totals"]["distance"],
-            "month_elevation": data["recent_ride_totals"]["elevation_gain"],
-            "year_dist": data["ytd_ride_totals"]["distance"],
-            "year_elevation": data["ytd_ride_totals"]["elevation_gain"],
-            "all_dist": data["all_ride_totals"]["distance"],
-            "all_elevation": data["all_ride_totals"]["elevation_gain"]
-        }, on_conflict="id"
-    ).execute()
-
-    # Runs
-    supabase.table("RUNS").upsert(
-        {
-            "id": ID,
-            "month_dist": data["recent_run_totals"]["distance"],
-            "month_elevation": data["recent_run_totals"]["elevation_gain"],
-            "year_dist": data["ytd_run_totals"]["distance"],
-            "year_elevation": data["ytd_run_totals"]["elevation_gain"],
-            "all_dist": data["all_run_totals"]["distance"],
-            "all_elevation": data["all_run_totals"]["elevation_gain"]
-        }, on_conflict="id"
-    ).execute()
-
-    # Swims
-    supabase.table("SWIMS").upsert(
-        {
-            "id": ID,
-            "month_dist": data["recent_swim_totals"]["distance"],
-            "year_dist": data["ytd_swim_totals"]["distance"],
-            "all_dist": data["all_swim_totals"]["distance"]
-        }, on_conflict="id"
-    ).execute()
-
-    return data
+    supabase.table("SWIMS").upsert({
+        "id": user_id,
+        "month_dist": data["recent_swim_totals"]["distance"],
+        "year_dist": data["ytd_swim_totals"]["distance"],
+        "all_dist": data["all_swim_totals"]["distance"]
+    }, on_conflict="id").execute()
 
 
-
-# ---------------------------------------------------------
-# LOGIN (HEAD + GET)
-# ---------------------------------------------------------
-@app.api_route("/login", methods=["GET", "HEAD"])
+# -----------------------------
+# 6) Login redirect
+# -----------------------------
+@app.get("/login")
 def login():
-    print("login called")
     auth_url = (
         "https://www.strava.com/oauth/authorize"
         f"?client_id={CLIENT_ID}"
@@ -210,81 +169,53 @@ def login():
         f"&response_type=code"
         f"&scope={SCOPE}"
     )
-
     return RedirectResponse(url=auth_url)
 
 
+# -----------------------------
+# 7) Leaderboard
+# -----------------------------
+@app.get("/leaderboard")
+async def leaderboard():
+    users = supabase.table("USERS").select("id,username").execute().data
+    lb = []
 
-# ---------------------------------------------------------
-# LEADERBOARD (HEAD + GET)
-# ---------------------------------------------------------
-@app.api_route("/leaderboard", methods=["GET", "HEAD"])
-async def generate_leaderboard():
-    Users: list[Any] = supabase.table("USERS").select("id, username").execute().data
-    Leaderboard = []
+    for u in users:
+        uid = u["id"]
+        run = supabase.table("RUNS").select("*").eq("id", uid).execute().data[0]
+        ride = supabase.table("RIDES").select("*").eq("id", uid).execute().data[0]
+        swim = supabase.table("SWIMS").select("*").eq("id", uid).execute().data[0]
 
-    for user in Users:
-        user_id = user["id"]
-        username = user["username"]
-        run_data = helper_run(user_id)
-        ride_data = helper_ride(user_id)
-        swim_data = helper_swim(user_id)
-        
         score = (
-            run_data["month_dist"] + run_data["month_elevation"] / 0.1 +
-            ride_data["month_dist"] / 4 + ride_data["month_elevation"] / 0.3 +
-            swim_data["month_dist"] / 0.25
+            run["month_dist"] + run["month_elevation"] / 0.1 +
+            ride["month_dist"] / 4 + ride["month_elevation"] / 0.3 +
+            swim["month_dist"] / 0.25
         )
+        lb.append({"id": uid, "username": u["username"], "score": score})
 
-        Leaderboard.append({
-            "id": user_id,
-            "username": username,
-            "score": score
-        })
-
-    Leaderboard.sort(key=lambda x: x["score"], reverse=True)
-    return {"LeaderBoard": Leaderboard[0:10]}
+    lb.sort(key=lambda x: x["score"], reverse=True)
+    return {"LeaderBoard": lb[:10]}
 
 
-
-# ---------------------------------------------------------
-# RUN, RIDE, SWIM (HEAD + GET)
-# ---------------------------------------------------------
-@app.api_route("/run", methods=["GET", "HEAD"])
-async def run_data(FTC_Token: Annotated[str | None, Cookie()] = None):
+# -----------------------------
+# 8) User stats endpoints
+# -----------------------------
+@app.get("/run")
+async def run(FTC_Token: Optional[str] = Cookie(None)):
     if not FTC_Token:
-        return {"Error": "No Cookie Found"}
-    return helper_run(FTC_Token)
+        return {"error": "No cookie found"}
+    return supabase.table("RUNS").select("*").eq("id", FTC_Token).execute().data[0]
 
 
-@app.api_route("/ride", methods=["GET", "HEAD"])
-async def ride_data(FTC_Token: Annotated[str | None, Cookie()] = None):
+@app.get("/ride")
+async def ride(FTC_Token: Optional[str] = Cookie(None)):
     if not FTC_Token:
-        return {"Error": "No Cookie Found"}
-    return helper_ride(FTC_Token)
+        return {"error": "No cookie found"}
+    return supabase.table("RIDES").select("*").eq("id", FTC_Token).execute().data[0]
 
 
-@app.api_route("/swim", methods=["GET", "HEAD"])
-async def swim_data(FTC_Token: Annotated[str | None, Cookie()] = None):
+@app.get("/swim")
+async def swim(FTC_Token: Optional[str] = Cookie(None)):
     if not FTC_Token:
-        return {"Error": "No Cookie Found"}
-    return helper_swim(FTC_Token)
-
-
-
-# ---------------------------------------------------------
-# HELPER FUNCTIONS
-# ---------------------------------------------------------
-def helper_run(user_id: str):
-    data: Any = supabase.table("RUNS").select("*").eq("id", user_id).execute()
-    return data.data[0]
-
-
-def helper_ride(user_id: str):
-    data: Any = supabase.table("RIDES").select("*").eq("id", user_id).execute()
-    return data.data[0]
-
-
-def helper_swim(user_id: str):
-    data: Any = supabase.table("SWIMS").select("*").eq("id", user_id).execute()
-    return data.data[0]
+        return {"error": "No cookie found"}
+    return supabase.table("SWIMS").select("*").eq("id", FTC_Token).execute().data[0]
