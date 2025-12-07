@@ -201,21 +201,22 @@ async def leaderboard():
 # 8) User stats endpoints
 # -----------------------------
 @app.get("/run")
-async def run(FTC_Token: Optional[str] = Cookie(None)):
+async def run(FTC_Token: str):
     if not FTC_Token:
         return {"error": "No cookie found"}
     return supabase.table("RUNS").select("*").eq("id", FTC_Token).execute().data[0]
 
 
 @app.get("/ride")
-async def ride(FTC_Token: Optional[str] = Cookie(None)):
+async def ride(FTC_Token: str):
     if not FTC_Token:
         return {"error": "No cookie found"}
     return supabase.table("RIDES").select("*").eq("id", FTC_Token).execute().data[0]
 
 
 @app.get("/swim")
-async def swim(FTC_Token: Optional[str] = Cookie(None)):
+async def swim(FTC_Token: str):
     if not FTC_Token:
         return {"error": "No cookie found"}
     return supabase.table("SWIMS").select("*").eq("id", FTC_Token).execute().data[0]
+
