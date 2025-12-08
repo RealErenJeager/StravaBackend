@@ -10,13 +10,13 @@ from typing import Any, Optional
 # -----------------------------
 # 1) ENVIRONMENT VARIABLES
 # -----------------------------
-CLIENT_ID = os.getenv("STRAVA_CLIENT_ID")
-CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("STRAVA_REDIRECT_URI")
+CLIENT_ID = 184811 #os.getenv("STRAVA_CLIENT_ID")
+CLIENT_SECRET = "f211a3bf3d878f3e9096cb90f6d3d78c75ed2477" #os.getenv("STRAVA_CLIENT_SECRET")
+REDIRECT_URI = "https://stravabackend.onrender.com/exchange_token" #os.getenv("STRAVA_REDIRECT_URI")
 SCOPE = "read,activity:read_all"
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_URL = "https://hicsdiuldmcpolnvyapv.supabase.co" #os.getenv("SUPABASE_URL")
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhpY3NkaXVsZG1jcG9sbnZ5YXB2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTkyOTM3NTAsImV4cCI6MjA3NDg2OTc1MH0.UumpymuCYtykPsp0f3EWY_UduwuhNizzFupT4LeaKEs" #os.getenv("SUPABASE_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
@@ -219,4 +219,5 @@ async def swim(FTC_Token: str):
     if not FTC_Token:
         return {"error": "No cookie found"}
     return supabase.table("SWIMS").select("*").eq("id", FTC_Token).execute().data[0]
+
 
