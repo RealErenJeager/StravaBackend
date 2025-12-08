@@ -7,9 +7,6 @@ from fastapi.responses import RedirectResponse
 from supabase import create_client
 from typing import Any, Optional
 
-# -----------------------------
-# 1) ENVIRONMENT VARIABLES
-# -----------------------------
 CLIENT_ID = 184811 #os.getenv("STRAVA_CLIENT_ID")
 CLIENT_SECRET = "f211a3bf3d878f3e9096cb90f6d3d78c75ed2477" #os.getenv("STRAVA_CLIENT_SECRET")
 REDIRECT_URI = "https://stravabackend.onrender.com/exchange_token" #os.getenv("STRAVA_REDIRECT_URI")
@@ -22,9 +19,6 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
 
 
-# -----------------------------
-# 2) Exchange code → tokens
-# -----------------------------
 @app.get("/exchange_token")
 def exchange_tokens(code: str, scope: str):
     if not code:
@@ -45,7 +39,6 @@ def exchange_tokens(code: str, scope: str):
     token = res.json()
     athlete = token["athlete"]
 
-    # store tokens in Supabase
     supabase.table("USERS").upsert({
         "id": athlete["id"],
         "username": athlete["username"],
@@ -59,9 +52,6 @@ def exchange_tokens(code: str, scope: str):
     return response
 
 
-# -----------------------------
-# 3) Token management
-# -----------------------------
 def ensure_access_token(user_id: str) -> Optional[str]:
     res = supabase.table("USERS").select("*").eq("id", user_id).execute()
     if not res.data:
@@ -98,9 +88,6 @@ def refresh_token(user_id: str, refresh_token: str) -> bool:
     return True
 
 
-# -----------------------------
-# 4) Background periodic fetch
-# -----------------------------
 @app.on_event("startup")
 async def startup():
     asyncio.create_task(periodic_fetch())
@@ -114,9 +101,6 @@ async def periodic_fetch():
         await asyncio.sleep(24 * 60 * 60)
 
 
-# -----------------------------
-# 5) Fetch ride/run/swim stats
-# -----------------------------
 async def fetch_stats(user_id: str):
     token = ensure_access_token(user_id)
     if not token:
@@ -157,9 +141,6 @@ async def fetch_stats(user_id: str):
     }, on_conflict="id").execute()
 
 
-# -----------------------------
-# 6) Login redirect
-# -----------------------------
 @app.get("/login")
 def login():
     auth_url = (
@@ -172,9 +153,6 @@ def login():
     return RedirectResponse(url=auth_url)
 
 
-# -----------------------------
-# 7) Leaderboard
-# -----------------------------
 @app.get("/leaderboard")
 async def leaderboard():
     users = supabase.table("USERS").select("id,username").execute().data
@@ -197,9 +175,6 @@ async def leaderboard():
     return {"LeaderBoard": lb[:10]}
 
 
-# -----------------------------
-# 8) User stats endpoints
-# -----------------------------
 @app.get("/run")
 async def run(FTC_Token: str):
     if not FTC_Token:
@@ -219,5 +194,6 @@ async def swim(FTC_Token: str):
     if not FTC_Token:
         return {"error": "No cookie found"}
     return supabase.table("SWIMS").select("*").eq("id", FTC_Token).execute().data[0]
+
 
 
